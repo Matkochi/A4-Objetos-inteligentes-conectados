@@ -7,55 +7,126 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <BlynkSimpleEsp32.h>
-
-
+#include <PubSubClient.h>  // Biblioteca para MQTT
 #include <DHT.h>
 
-char auth[] = BLYNK_AUTH_TOKEN;
+// Configurações WiFi
+char ssid[] = "Wokwi-GUEST";
+char pass[] = "";
 
-char ssid[] = "Wokwi-GUEST"; //nama hotspot yang digunakan
-char pass[] = ""; //password hotspot yang digunakan
+// Configurações MQTT
+const char* mqtt_server = "broker.hivemq.com"; // Broker público para teste
+const int mqtt_port = 1883;
+const char* mqtt_topic_temp = "esp32dht22/temperature";
+const char* mqtt_topic_hum = "esp32dht22/humidity";
+const char* mqtt_client_id = "ESP32Client-DHT22";
 
-#define DHTPIN 5          // Mention the digital pin where you connected 
-#define DHTTYPE DHT22     // DHT 11  
-DHT dht(DHTPIN, DHTTYPE);
+WiFiClient espClient;
+PubSubClient mqttClient(espClient); // Objeto MQTT
 BlynkTimer timer;
 
+// Configurações DHT22
+#define DHTPIN 5
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
 
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Conectando a ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi conectado");
+  Serial.println("Endereço IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect_mqtt() {
+  while (!mqttClient.connected()) {
+    Serial.print("Tentando conexão MQTT...");
+    if (mqttClient.connect(mqtt_client_id)) {
+      Serial.println("conectado");
+    } else {
+      Serial.print("falha, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" tentando novamente em 5 segundos");
+      delay(5000);
+    }
+  }
+}
+
+void sendSensor() {
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  
+  if (isnan(h) || isnan(t)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  // Envia dados para o Blynk
+  Blynk.virtualWrite(V1, h);
+  Blynk.virtualWrite(V0, t);
+  
+  // Publica dados no MQTT
+  if (mqttClient.connected()) {
+    char tempString[8];
+    char humString[8];
+    
+    dtostrf(t, 6, 2, tempString);
+    dtostrf(h, 6, 2, humString);
+    
+    mqttClient.publish(mqtt_topic_temp, tempString);
+    mqttClient.publish(mqtt_topic_hum, humString);
+    
+    Serial.print("Dados publicados no MQTT - ");
+  }
+
+  Serial.print("Temperature: ");
+  Serial.print(t);
+  Serial.print("°C, Humidity: ");
+  Serial.print(h);
+  Serial.println("%");
+
+  if (t > 30) {
+    Blynk.logEvent("temp_alert", "Temp above 30 degrees");
+  }
+}
 
 void setup() {
   Serial.begin(115200);
-  Blynk.begin(auth, ssid, pass);
-  // You can also specify server:
-  //Blynk.begin(auth, ssid, pass, "blynk.cloud", 80);
-  //Blynk.begin(auth, ssid, pass, IPAddress(192,168,1,100), 8080);
-
+  
+  // Inicializa WiFi
+  setup_wifi();
+  
+  // Inicializa Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+  
+  // Configura MQTT
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  
+  // Inicializa sensor DHT
   dht.begin();
+  
+  // Configura timer para leitura do sensor
   timer.setInterval(2500L, sendSensor);
 }
 
 void loop() {
   Blynk.run();
   timer.run();
-}
-void sendSensor() {
-  float h = dht.readHumidity();
-  float t = dht.readTemperature(); // or dht.readTemperature(true) for Fahrenheit
-  if (isnan(h) || isnan(t)) {
-    Serial.println("Failed to read from DHT sensor!");
-    return;
+  
+  // Mantém conexão MQTT
+  if (!mqttClient.connected()) {
+    reconnect_mqtt();
   }
-
-  Blynk.virtualWrite(V1, h);
-  Blynk.virtualWrite(V0, t);
-  Serial.print("Temperature : ");
-  Serial.print(t);
-  Serial.print("    Humidity : ");
-  Serial.println(h);
-
-
-  if (t > 30) {
-    // Blynk.email("isamahfudi08@gmail.com", "Alert", "Temperature over 28C!");
-    Blynk.logEvent("temp_alert", "Temp above 30 degrees");
-  }
+  mqttClient.loop();
 }
