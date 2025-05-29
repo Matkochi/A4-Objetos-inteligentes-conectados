@@ -35,7 +35,7 @@ Este projeto apresenta uma solução de **Agricultura de Precisão** utilizando 
 
 ## 🔗 Acesse a Simulação no Wokwi
 
-👉 [Clique aqui para abrir a simulação](https://wokwi.com/projects/397826075247285249)
+👉 [Clique aqui para abrir a simulação](https://wokwi.com/projects/422055428352222209)
 
 ---
 
