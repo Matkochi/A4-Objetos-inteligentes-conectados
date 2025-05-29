@@ -1,132 +1,110 @@
-#define BLYNK_TEMPLATE_ID "TMPL6vLnFBPKT"
-#define BLYNK_TEMPLATE_NAME "ESP32 DHT22"
-#define BLYNK_AUTH_TOKEN "D647NB0d79kw_rA5-eNzdPp83V5Yb8Ib"
-
-#define BLYNK_PRINT Serial
-
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <BlynkSimpleEsp32.h>
-#include <PubSubClient.h>  // Biblioteca para MQTT
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
 #include <DHT.h>
 
-// Configurações WiFi
-char ssid[] = "Wokwi-GUEST";
-char pass[] = "";
+// Wi-Fi
+const char* ssid = "SEU_SSID";
+const char* password = "SUA_SENHA";
 
-// Configurações MQTT
-const char* mqtt_server = "broker.hivemq.com"; // Broker público para teste
-const int mqtt_port = 1883;
-const char* mqtt_topic_temp = "esp32dht22/temperature";
-const char* mqtt_topic_hum = "esp32dht22/humidity";
-const char* mqtt_client_id = "ESP32Client-DHT22";
+// Broker MQTT (Mosquitto local ou público como broker.hivemq.com)
+const char* mqtt_server = "broker.hivemq.com";
 
-WiFiClient espClient;
-PubSubClient mqttClient(espClient); // Objeto MQTT
-BlynkTimer timer;
-
-// Configurações DHT22
-#define DHTPIN 5
+// DHT
+#define DHTPIN D5
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
+// Pinos
+#define SOIL_PIN A0
+#define VALVE_PIN D2
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
 void setup_wifi() {
   delay(10);
-  Serial.println();
-  Serial.print("Conectando a ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, pass);
-
+  Serial.println("Conectando-se ao WiFi...");
+  WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-
-  Serial.println("");
   Serial.println("WiFi conectado");
-  Serial.println("Endereço IP: ");
-  Serial.println(WiFi.localIP());
 }
 
-void reconnect_mqtt() {
-  while (!mqttClient.connected()) {
+void reconnect() {
+  while (!client.connected()) {
     Serial.print("Tentando conexão MQTT...");
-    if (mqttClient.connect(mqtt_client_id)) {
+    if (client.connect("ESP8266Client")) {
       Serial.println("conectado");
+      client.subscribe("irrigacao/controle");  // exemplo de canal de entrada
     } else {
       Serial.print("falha, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" tentando novamente em 5 segundos");
+      Serial.print(client.state());
+      Serial.println(" tentando novamente em 5s");
       delay(5000);
     }
   }
 }
 
-void sendSensor() {
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
-  
-  if (isnan(h) || isnan(t)) {
-    Serial.println("Failed to read from DHT sensor!");
-    return;
+void callback(char* topic, byte* payload, unsigned int length) {
+  // Exemplo: controle remoto da válvula via MQTT
+  String message;
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
   }
 
-  // Envia dados para o Blynk
-  Blynk.virtualWrite(V1, h);
-  Blynk.virtualWrite(V0, t);
-  
-  // Publica dados no MQTT
-  if (mqttClient.connected()) {
-    char tempString[8];
-    char humString[8];
-    
-    dtostrf(t, 6, 2, tempString);
-    dtostrf(h, 6, 2, humString);
-    
-    mqttClient.publish(mqtt_topic_temp, tempString);
-    mqttClient.publish(mqtt_topic_hum, humString);
-    
-    Serial.print("Dados publicados no MQTT - ");
-  }
-
-  Serial.print("Temperature: ");
-  Serial.print(t);
-  Serial.print("°C, Humidity: ");
-  Serial.print(h);
-  Serial.println("%");
-
-  if (t > 30) {
-    Blynk.logEvent("temp_alert", "Temp above 30 degrees");
+  if (String(topic) == "irrigacao/controle") {
+    if (message == "ligar") {
+      digitalWrite(VALVE_PIN, HIGH);
+    } else if (message == "desligar") {
+      digitalWrite(VALVE_PIN, LOW);
+    }
   }
 }
 
 void setup() {
-  Serial.begin(115200);
-  
-  // Inicializa WiFi
-  setup_wifi();
-  
-  // Inicializa Blynk
-  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
-  
-  // Configura MQTT
-  mqttClient.setServer(mqtt_server, mqtt_port);
-  
-  // Inicializa sensor DHT
+  Serial.begin(9600);
   dht.begin();
-  
-  // Configura timer para leitura do sensor
-  timer.setInterval(2500L, sendSensor);
+  pinMode(VALVE_PIN, OUTPUT);
+
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
 }
 
 void loop() {
-  Blynk.run();
-  timer.run();
-  
-  // Mantém conexão MQTT
-  if (!mqttClient.connected()) {
-    reconnect_mqtt();
+  if (!client.connected()) {
+    reconnect();
   }
-  mqttClient.loop();
+  client.loop();
+
+  float temperatura = dht.readTemperature();
+  float umidade = dht.readHumidity();
+  int umidadeSolo = analogRead(SOIL_PIN);
+
+  Serial.print("Temp: "); Serial.print(temperatura);
+  Serial.print(" | Umidade Ar: "); Serial.print(umidade);
+  Serial.print(" | Solo: "); Serial.println(umidadeSolo);
+
+  if (umidadeSolo > 700) {
+    digitalWrite(VALVE_PIN, HIGH);
+    client.publish("irrigacao/status", "Irrigando");
+  } else {
+    digitalWrite(VALVE_PIN, LOW);
+    client.publish("irrigacao/status", "Solo úmido");
+  }
+
+  // Publica os valores dos sensores
+  char buffer[16];
+  dtostrf(temperatura, 4, 2, buffer);
+  client.publish("irrigacao/temperatura", buffer);
+
+  dtostrf(umidade, 4, 2, buffer);
+  client.publish("irrigacao/umidade_ar", buffer);
+
+  itoa(umidadeSolo, buffer, 10);
+  client.publish("irrigacao/umidade_solo", buffer);
+
+  delay(5000);
 }
