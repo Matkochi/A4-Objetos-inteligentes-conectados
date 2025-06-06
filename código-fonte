@@ -1,110 +1,269 @@
-#include <ESP8266WiFi.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <DHTesp.h>
 #include <PubSubClient.h>
-#include <DHT.h>
+#include <U8g2lib.h>
+#include <uRTCLib.h>
+#include <WiFi.h>
 
-// Wi-Fi
-const char* ssid = "SEU_SSID";
-const char* password = "SUA_SENHA";
+const char *WIFI_SSID = "Wokwi-GUEST";
+const char *WIFI_PWD = "";
 
-// Broker MQTT (Mosquitto local ou público como broker.hivemq.com)
-const char* mqtt_server = "broker.hivemq.com";
+const char *MQTT_SERVER = "broker.hivemq.com";
+const uint16_t MQTT_PORT = 1883;
 
-// DHT
-#define DHTPIN D5
-#define DHTTYPE DHT22
-DHT dht(DHTPIN, DHTTYPE);
+const byte DHT_PIN = 15;
 
-// Pinos
-#define SOIL_PIN A0
-#define VALVE_PIN D2
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+Adafruit_MPU6050 mpu;
+DHTesp dhtSensor;
+uRTCLib rtc(0x68);
 
-void setup_wifi() {
-  delay(10);
-  Serial.println("Conectando-se ao WiFi...");
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+U8X8_SSD1306_128X64_NONAME_HW_I2C display(U8X8_PIN_NONE);
+
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+
+void CallbackMqtt(char* topic, byte* payload, unsigned int length)
+{
+  Serial.print("Callback - ");
+  Serial.print("Message:");
+  for (int i = 0; i < length; i++)
+  {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+void SetupMqtt()
+{
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  // set the callback function
+  mqttClient.setCallback(CallbackMqtt);
+}
+
+void ConnectToMqtt()
+{
+  Serial.println("Connecting to MQTT Broker...");
+  while (!mqttClient.connected())
+  {
+    char clientId[100] = "\0";
+    sprintf(clientId, "ESP32Client-%04X", random(0xffff));
+    Serial.println(clientId);
+
+    if (mqttClient.connect(clientId))
+    {
+      Serial.println("Connected to MQTT broker.");
+      // subscribe to topic
+      mqttClient.subscribe("/sensors/commands");
+    }
+  }
+}
+
+void ConnectToWiFi()
+{
+  Serial.print("Connecting to WiFi ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.begin(WIFI_SSID, WIFI_PWD, 6);
+  while (WiFi.status() != WL_CONNECTED)
+  {
     Serial.print(".");
+    delay(500);
   }
-  Serial.println("WiFi conectado");
+  Serial.print("\nConnected to ");
+  Serial.println(WIFI_SSID);
 }
 
-void reconnect() {
-  while (!client.connected()) {
-    Serial.print("Tentando conexão MQTT...");
-    if (client.connect("ESP8266Client")) {
-      Serial.println("conectado");
-      client.subscribe("irrigacao/controle");  // exemplo de canal de entrada
-    } else {
-      Serial.print("falha, rc=");
-      Serial.print(client.state());
-      Serial.println(" tentando novamente em 5s");
-      delay(5000);
+void SetupMpu6050()
+{
+  if (!mpu.begin(0x69))
+  {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1)
+    {
+      delay(10);
     }
   }
+  Serial.println("MPU6050 Found!");
+
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  Serial.print("Accelerometer range set to: ");
+  switch (mpu.getAccelerometerRange())
+  {
+    case MPU6050_RANGE_2_G:
+      Serial.println("+-2G");
+      break;
+    case MPU6050_RANGE_4_G:
+      Serial.println("+-4G");
+      break;
+    case MPU6050_RANGE_8_G:
+      Serial.println("+-8G");
+      break;
+    case MPU6050_RANGE_16_G:
+      Serial.println("+-16G");
+      break;
+  }
+
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  Serial.print("Gyro range set to: ");
+  switch (mpu.getGyroRange())
+  {
+    case MPU6050_RANGE_250_DEG:
+      Serial.println("+- 250 deg/s");
+      break;
+    case MPU6050_RANGE_500_DEG:
+      Serial.println("+- 500 deg/s");
+      break;
+    case MPU6050_RANGE_1000_DEG:
+      Serial.println("+- 1000 deg/s");
+      break;
+    case MPU6050_RANGE_2000_DEG:
+      Serial.println("+- 2000 deg/s");
+      break;
+  }
+
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  Serial.print("Filter bandwidth set to: ");
+  switch (mpu.getFilterBandwidth())
+  {
+    case MPU6050_BAND_260_HZ:
+      Serial.println("260 Hz");
+      break;
+    case MPU6050_BAND_184_HZ:
+      Serial.println("184 Hz");
+      break;
+    case MPU6050_BAND_94_HZ:
+      Serial.println("94 Hz");
+      break;
+    case MPU6050_BAND_44_HZ:
+      Serial.println("44 Hz");
+      break;
+    case MPU6050_BAND_21_HZ:
+      Serial.println("21 Hz");
+      break;
+    case MPU6050_BAND_10_HZ:
+      Serial.println("10 Hz");
+      break;
+    case MPU6050_BAND_5_HZ:
+      Serial.println("5 Hz");
+      break;
+  }
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  // Exemplo: controle remoto da válvula via MQTT
-  String message;
-  for (int i = 0; i < length; i++) {
-    message += (char)payload[i];
-  }
-
-  if (String(topic) == "irrigacao/controle") {
-    if (message == "ligar") {
-      digitalWrite(VALVE_PIN, HIGH);
-    } else if (message == "desligar") {
-      digitalWrite(VALVE_PIN, LOW);
-    }
-  }
+void SetupRtc()
+{
+  URTCLIB_WIRE.begin();
 }
 
-void setup() {
-  Serial.begin(9600);
-  dht.begin();
-  pinMode(VALVE_PIN, OUTPUT);
+void setup()
+{
+  Serial.begin(115200);
+  Serial.println("Setup begin");
 
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
+  ConnectToWiFi();
+  SetupMqtt();
+
+  SetupMpu6050();
+  dhtSensor.setup(DHT_PIN, DHTesp::DHT22);
+  SetupRtc();
+
+  display.begin();
+  display.setPowerSave(0);
+  display.setFont(u8x8_font_pxplusibmcgathin_f);
+  display.clearDisplay();
+  display.drawString(2, 1, "Test");
+  display.setCursor(0, 0);
+  display.print('1');
+  display.setCursor(0, 1);
+  display.print('2');
+  display.setCursor(0, 2);
+  display.print('3');
+  display.setCursor(0, 3);
+  display.print('4');
+  display.setCursor(0, 4);
+  display.print('5');
+  display.setCursor(0, 5);
+  display.print('6');
+
+  Serial.println("Setup end");
 }
 
-void loop() {
-  if (!client.connected()) {
-    reconnect();
+const size_t BUFFER_SIZE = 100;
+const char *BUFFER_FORMAT = "%1.3f";
+char buffer[BUFFER_SIZE + 1];  // Extra one for NULL terminator.
+
+void loop()
+{
+  if (!mqttClient.connected())
+  {
+    ConnectToMqtt();
   }
-  client.loop();
+  mqttClient.loop();
 
-  float temperatura = dht.readTemperature();
-  float umidade = dht.readHumidity();
-  int umidadeSolo = analogRead(SOIL_PIN);
+  static uint64_t last_time;
+  uint64_t now = millis();
+  if (now - last_time > 1 * 1000)
+  {
+    // Get new sensor events with the readings.
+    TempAndHumidity dht22Data = dhtSensor.getTempAndHumidity();
+    sensors_event_t a, g, mpu_temp;
+    mpu.getEvent(&a, &g, &mpu_temp);
+    rtc.refresh();
 
-  Serial.print("Temp: "); Serial.print(temperatura);
-  Serial.print(" | Umidade Ar: "); Serial.print(umidade);
-  Serial.print(" | Solo: "); Serial.println(umidadeSolo);
 
-  if (umidadeSolo > 700) {
-    digitalWrite(VALVE_PIN, HIGH);
-    client.publish("irrigacao/status", "Irrigando");
-  } else {
-    digitalWrite(VALVE_PIN, LOW);
-    client.publish("irrigacao/status", "Solo úmido");
+    // Publish and print the values.
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, dht22Data.temperature);
+    mqttClient.publish("/sensors/dht22_temp", buffer);
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, dht22Data.humidity);
+    mqttClient.publish("/sensors/dht22_hum", buffer);
+    Serial.println("Temp: " + String(dht22Data.temperature, 2) + "°C");
+    Serial.println("Humidity: " + String(dht22Data.humidity, 1) + "%");
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, a.acceleration.x);
+    mqttClient.publish("/sensors/mpu_ax", buffer);
+    Serial.print("Acceleration X: ");
+    Serial.print(buffer);
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, a.acceleration.y);
+    mqttClient.publish("/sensors/mpu_ay", buffer);
+    Serial.print(", Y: ");
+    Serial.print(buffer);
+    Serial.print(", Z: ");
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, a.acceleration.z);
+    mqttClient.publish("/sensors/mpu_az", buffer);
+    Serial.print(buffer);
+    Serial.println(" m/s^2");
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, g.gyro.x);
+    mqttClient.publish("/sensors/mpu_gx", buffer);
+    Serial.print("Rotation X: ");
+    Serial.print(buffer);
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, g.gyro.y);
+    mqttClient.publish("/sensors/mpu_gy", buffer);
+    Serial.print(", Y: ");
+    Serial.print(buffer);
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, g.gyro.z);
+    mqttClient.publish("/sensors/mpu_gz", buffer);
+    Serial.print(", Z: ");
+    Serial.print(buffer);
+    Serial.println(" rad/s");
+
+    snprintf(buffer, BUFFER_SIZE, BUFFER_FORMAT, mpu_temp.temperature);
+    mqttClient.publish("/sensors/mpu_temp", buffer);
+    Serial.print("Temperature: ");
+    Serial.print(buffer);
+    Serial.println(" degC");
+
+    snprintf(buffer, BUFFER_SIZE, "%02d/%02d/%02d (%s) %02d:%02d:%02d", rtc.year(), rtc.month(), rtc.day(), daysOfTheWeek[rtc.dayOfWeek() - 1], rtc.hour(), rtc.minute(), rtc.second());
+    mqttClient.publish("/sensors/rtc_time", buffer);
+    Serial.print("Current Date & Time: ");
+    Serial.println(buffer);
+
+    last_time = now;
   }
-
-  // Publica os valores dos sensores
-  char buffer[16];
-  dtostrf(temperatura, 4, 2, buffer);
-  client.publish("irrigacao/temperatura", buffer);
-
-  dtostrf(umidade, 4, 2, buffer);
-  client.publish("irrigacao/umidade_ar", buffer);
-
-  itoa(umidadeSolo, buffer, 10);
-  client.publish("irrigacao/umidade_solo", buffer);
-
-  delay(5000);
 }
